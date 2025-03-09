@@ -3,16 +3,22 @@ import compression from 'compression';
 import express from 'express';
 import localtunnel from 'localtunnel';
 import { rateLimit } from 'express-rate-limit';
-import {readFileSync} from "fs";
+import { readFileSync } from "fs";
 import config from './lib/config.js';
-import cache, {vacuum as vacuumCache, clean as cleanCache} from './lib/cache.js';
+import cache, { vacuum as vacuumCache, clean as cleanCache } from './lib/cache.js';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import * as meta from './lib/meta.js';
 import * as icon from './lib/icon.js';
 import * as debrid from './lib/debrid.js';
-import {getIndexers} from './lib/jackett.js';
+import { getIndexers } from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
-import {cleanTorrentFolder, createTorrentFolder} from './lib/torrentInfos.js';
+import { cleanTorrentFolder, createTorrentFolder } from './lib/torrentInfos.js';
+
+// Fix the missing import.meta.dirname issues
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const converter = new showdown.Converter();
 const welcomeMessageHtml = config.welcomeMessage ? `${converter.makeHtml(config.welcomeMessage)}<div class="my-4 border-top border-secondary-subtle"></div>` : '';
@@ -33,14 +39,16 @@ const limiter = rateLimit({
   standardHeaders: 'draft-7',
   keyGenerator: (req) => req.clientIp || req.ip,
   handler: (req, res, next, options) => {
-    if(req.route.path == '/:userConfig/stream/:type/:id.json'){
+    if (req.route.path == '/:userConfig/stream/:type/:id.json') {
       const resetInMs = new Date(req.rateLimit.resetTime) - new Date();
-      return res.json({streams: [{
-        name: `${config.addonName}`,
-        title: `🛑 Too many requests, please try in ${Math.ceil(resetInMs / 1000 / 60)} minute(s).`,
-        url: '#'
-      }]})
-    }else{
+      return res.json({
+        streams: [{
+          name: `${config.addonName}`,
+          title: `🛑 Too many requests, please try in ${Math.ceil(resetInMs / 1000 / 60)} minute(s).`,
+          url: '#'
+        }]
+      })
+    } else {
       return res.status(options.statusCode).send(options.message);
     }
   }
@@ -50,14 +58,15 @@ app.set('trust proxy', config.trustProxy);
 
 app.use((req, res, next) => {
   req.clientIp = req.ip;
-  if(req.get('CF-Connecting-IP')){
+  if (req.get('CF-Connecting-IP')) {
     req.clientIp = req.get('CF-Connecting-IP');
   }
   next();
 });
 
 app.use(compression());
-app.use(express.static(path.join(import.meta.dirname, 'static'), {maxAge: 86400e3}));
+// Use __dirname instead of import.meta.dirname
+app.use(express.static(path.join(__dirname, 'static'), { maxAge: 86400e3 }));
 
 app.get('/', (req, res) => {
   res.redirect('/configure')
@@ -76,11 +85,11 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/:userConfig?/configure', async(req, res) => {
+app.get('/:userConfig?/configure', async (req, res) => {
   let indexers = (await getIndexers().catch(() => []))
     .map(indexer => ({
-      value: indexer.id, 
-      label: indexer.title, 
+      value: indexer.id,
+      label: indexer.title,
       types: ['movie', 'series'].filter(type => indexer.searching[type].available)
     }));
   const templateConfig = {
@@ -92,14 +101,14 @@ app.get('/:userConfig?/configure', async(req, res) => {
     userConfig: req.params.userConfig || '',
     defaultUserConfig: config.defaultUserConfig,
     qualities: config.qualities,
-    languages: config.languages.map(l => ({value: l.value, label: l.label})).filter(v => v.value != 'multi'),
+    languages: config.languages.map(l => ({ value: l.value, label: l.label })).filter(v => v.value != 'multi'),
     metaLanguages: await meta.getLanguages(),
     sorts: config.sorts,
     indexers,
-    passkey: {enabled: false},
+    passkey: { enabled: false },
     immulatableUserConfigKeys: config.immulatableUserConfigKeys
   };
-  if(config.replacePasskey){
+  if (config.replacePasskey) {
     templateConfig.passkey = {
       enabled: true,
       infoUrl: config.replacePasskeyInfoUrl,
@@ -113,7 +122,7 @@ app.get('/:userConfig?/configure', async(req, res) => {
 });
 
 // https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/advanced.md#using-user-data-in-addons
-app.get("/:userConfig?/manifest.json", async(req, res) => {
+app.get("/:userConfig?/manifest.json", async (req, res) => {
   const manifest = {
     id: config.addonId,
     version: addon.version,
@@ -124,9 +133,9 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
     types: ["movie", "series"],
     idPrefixes: ["tt"],
     catalogs: [],
-    behaviorHints: {configurable: true}
+    behaviorHints: { configurable: true }
   };
-  if(req.params.userConfig){
+  if (req.params.userConfig) {
     const userConfig = JSON.parse(atob(req.params.userConfig));
     const debridInstance = debrid.instance(userConfig);
     manifest.name += ` ${debridInstance.shortName}`;
@@ -134,66 +143,68 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
   respond(res, manifest);
 });
 
-app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
+app.get("/:userConfig/stream/:type/:id.json", limiter, async (req, res) => {
 
   try {
 
     const streams = await jackettio.getStreams(
-      Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp}),
-      req.params.type, 
+      Object.assign(JSON.parse(atob(req.params.userConfig)), { ip: req.clientIp }),
+      req.params.type,
       req.params.id,
       `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}`
     );
 
-    return respond(res, {streams});
+    return respond(res, { streams });
 
-  }catch(err){
+  } catch (err) {
 
     console.log(req.params.id, err);
-    return respond(res, {streams: []});
+    return respond(res, { streams: [] });
 
   }
 
 });
 
-app.get("/stream/:type/:id.json", async(req, res) => {
+app.get("/stream/:type/:id.json", async (req, res) => {
 
-  return respond(res, {streams: [{
-    name: config.addonName,
-    title: `ℹ Kindly configure this addon to access streams.`,
-    url: '#'
-  }]});
+  return respond(res, {
+    streams: [{
+      name: config.addonName,
+      title: `ℹ Kindly configure this addon to access streams.`,
+      url: '#'
+    }]
+  });
 
 });
 
-app.use('/:userConfig/download/:type/:id/:torrentId/:name?', async(req, res, next) => {
+app.use('/:userConfig/download/:type/:id/:torrentId/:name?', async (req, res, next) => {
 
-  if (req.method !== 'GET' && req.method !== 'HEAD'){
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
     return next();
   }
 
   try {
 
     const url = await jackettio.getDownload(
-      Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp}),
-      req.params.type, 
-      req.params.id, 
+      Object.assign(JSON.parse(atob(req.params.userConfig)), { ip: req.clientIp }),
+      req.params.type,
+      req.params.id,
       req.params.torrentId
     );
 
     const parsed = new URL(url);
-    const cut = (value) => value ?  `${value.substr(0, 5)}******${value.substr(-5)}` : '';
+    const cut = (value) => value ? `${value.substr(0, 5)}******${value.substr(-5)}` : '';
     console.log(`${req.params.id} : Redirect: ${parsed.protocol}//${parsed.host}${cut(parsed.pathname)}${cut(parsed.search)}`);
-    
+
     res.status(302);
     res.set('location', url);
     res.send('');
 
-  }catch(err){
+  } catch (err) {
 
     console.log(req.params.id, err);
 
-    switch(err.message){
+    switch (err.message) {
       case debrid.ERROR.NOT_READY:
         res.status(302);
         res.set('location', `/videos/not_ready.mp4`);
@@ -246,18 +257,20 @@ app.use((err, req, res, next) => {
   }
 })
 
-const server = app.listen(config.port, async () => {
+// Add IP address binding option
+const serverIp = process.env.SERVER_IP || '0.0.0.0'; // Default to all interfaces
+const server = app.listen(config.port, serverIp, async () => {
 
   console.log('───────────────────────────────────────');
   console.log(`Started addon ${addon.name} v${addon.version}`);
-  console.log(`Server listen at: http://localhost:${config.port}`);
+  console.log(`Server listen at: http://${serverIp === '0.0.0.0' ? 'localhost' : serverIp}:${config.port}`);
   console.log('───────────────────────────────────────');
 
   let tunnel;
-  if(config.localtunnel){
+  if (config.localtunnel) {
     let subdomain = await cache.get('localtunnel:subdomain');
-    tunnel = await localtunnel({port: config.port, subdomain});
-    await cache.set('localtunnel:subdomain', tunnel.clientId, {ttl: 86400*365});
+    tunnel = await localtunnel({ port: config.port, subdomain });
+    await cache.set('localtunnel:subdomain', tunnel.clientId, { ttl: 86400 * 365 });
     console.log(`Your addon is available on the following address: ${tunnel.url}/configure`);
     tunnel.on('close', () => console.log("tunnels are closed"));
   }
@@ -269,14 +282,14 @@ const server = app.listen(config.port, async () => {
   intervals.push(setInterval(cleanTorrentFolder, 3600e3));
 
   vacuumCache().catch(err => console.log(`Failed to vacuum cache: ${err}`));
-  intervals.push(setInterval(() => vacuumCache(), 86400e3*7));
+  intervals.push(setInterval(() => vacuumCache(), 86400e3 * 7));
 
   cleanCache().catch(err => console.log(`Failed to clean cache: ${err}`));
   intervals.push(setInterval(() => cleanCache(), 3600e3));
 
   function closeGracefully(signal) {
     console.log(`Received signal to terminate: ${signal}`);
-    if(tunnel)tunnel.close();
+    if (tunnel) tunnel.close();
     intervals.forEach(interval => clearInterval(interval));
     server.close(() => {
       console.log('Server closed');
@@ -285,5 +298,4 @@ const server = app.listen(config.port, async () => {
   }
   process.once('SIGINT', closeGracefully);
   process.once('SIGTERM', closeGracefully);
-
 });
